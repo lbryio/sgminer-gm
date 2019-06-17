@@ -769,6 +769,16 @@ static inline void flip80(void *dest_p, const void *src_p)
     dest[i] = swab32(src[i]);
 }
 
+static inline void flip112(void *dest_p, const void *src_p)
+{
+  uint32_t *dest = (uint32_t *)dest_p;
+  const uint32_t *src = (uint32_t *)src_p;
+  int i;
+
+  for (i = 0; i < 28; i++)
+    dest[i] = swab32(src[i]);
+}
+
 static inline void flip128(void *dest_p, const void *src_p)
 {
   uint32_t *dest = (uint32_t *)dest_p;
@@ -1333,6 +1343,8 @@ struct stratum_work {
   char *bbversion;
   char *nbit;
   char *ntime;
+  uint8_t trie[32];
+  bool has_trie;
   bool clean;
 
   size_t cb_len;
@@ -1486,7 +1498,6 @@ struct pool {
   char *coinbasetxn;
   char *longpollid;
   char *gbt_workid;
-  int gbt_expires;
   uint32_t gbt_version;
   uint32_t curtime;
   uint32_t gbt_bits;
@@ -1494,7 +1505,7 @@ struct pool {
   size_t gbt_txns;
   size_t coinbase_len;
 
-  /* equihash GBT */
+  /* equihash GBT or LBRY claim hash */
   unsigned char reserved[32];
 
   /* Shared by both stratum & GBT */

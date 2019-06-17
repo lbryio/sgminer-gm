@@ -2234,6 +2234,18 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
     //set solutionsize - supposed to always be 1344
     add_var_int(work->data + offsetNonce + 32, 1344);
   }
+  else if (pool->algorithm.type == ALGO_LBRY) {
+      headerLen = 112;
+      offsetTime = 100;
+      offsetBits = 104;
+      offsetNonce = 108;
+      nonceLen = 4;
+
+      offsetPadding = headerLen;
+      lenPadding = 168 - offsetPadding;
+
+      memcpy(work->data + offsetMerkleRoot + 32, pool->reserved, 32);
+  }
   else {
     headerLen = 128;
     offsetTime = offsetMerkleRoot + 32;
@@ -2314,7 +2326,6 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   const char *longpollid;
   const char *reserved;
   unsigned char hash_swap[32];
-  int expires;
   int version;
   int curtime;
   bool submitold;
@@ -2329,11 +2340,10 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   const char *coinbasefrscript;
 
   previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
-  reserved = json_string_value(json_object_get(res_val, "reserved"));
+  reserved = json_string_value(json_object_get(res_val, pool->algorithm.type == ALGO_LBRY ? "claimtrie" : "reserved"));
   target = json_string_value(json_object_get(res_val, "target"));
   coinbasetxn = json_string_value(json_object_get(json_object_get(res_val, "coinbasetxn"), "data"));
   longpollid = json_string_value(json_object_get(res_val, "longpollid"));
-  expires = json_integer_value(json_object_get(res_val, "expires"));
   version = json_integer_value(json_object_get(res_val, "version"));
   curtime = json_integer_value(json_object_get(res_val, "curtime"));
   submitold = json_is_true(json_object_get(res_val, "submitold"));
@@ -2342,6 +2352,7 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 
   bool invalid = false;
   if (pool->algorithm.type == ALGO_EQUIHASH) {
+    applog(LOG_DEBUG, "USING EQUIHASH");
     height = json_integer_value(json_object_get(res_val, "height"));
     coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
     coinbasefrvalue = json_integer_value(json_object_get(res_val, "coinbasefrvalue"));
@@ -2349,30 +2360,31 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     invalid = (!previousblockhash || !target || !coinbasevalue || !height || !longpollid || !version || !curtime || !bits);
   }
   else {
-    invalid = (!previousblockhash || !target || !coinbasetxn || !longpollid || !expires || !version || !curtime || !bits);
+    invalid = (!previousblockhash || !target || !coinbasetxn || !longpollid || !version || !curtime || !bits);
+  }
+
+  if (previousblockhash)
+    applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
+  if (reserved)
+    applog(LOG_DEBUG, "reserved: %s", reserved);
+  if (target)
+    applog(LOG_DEBUG, "target: %s", target);
+  if (coinbasetxn)
+    applog(LOG_DEBUG, "coinbasetxn: %s", coinbasetxn);
+  if (longpollid)
+    applog(LOG_DEBUG, "longpollid: %s", longpollid);
+  applog(LOG_DEBUG, "version: %d", version);
+  applog(LOG_DEBUG, "curtime: %d", curtime);
+  applog(LOG_DEBUG, "submitold: %s", submitold ? "true" : "false");
+  if (bits)
+    applog(LOG_DEBUG, "bits: %s", bits);
+  if (workid) {
+    applog(LOG_DEBUG, "workid: %s, %s", workid, !workid ? "true" : "false");
   }
 
   if (invalid) {
     applog(LOG_ERR, "JSON failed to decode GBT");
     return false;
-  }
-
-  applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
-  if (reserved) {
-    applog(LOG_DEBUG, "reserved: %s", reserved);
-  }
-  applog(LOG_DEBUG, "target: %s", target);
-  applog(LOG_DEBUG, "coinbasetxn: %s", coinbasetxn);
-  applog(LOG_DEBUG, "longpollid: %s", longpollid);
-  if (expires) {
-    applog(LOG_DEBUG, "expires: %d", expires);
-  }
-  applog(LOG_DEBUG, "version: %d", version);
-  applog(LOG_DEBUG, "curtime: %d", curtime);
-  applog(LOG_DEBUG, "submitold: %s", submitold ? "true" : "false");
-  applog(LOG_DEBUG, "bits: %s", bits);
-  if (workid) {
-    applog(LOG_DEBUG, "workid: %s", workid);
   }
 
   cg_wlock(&pool->gbt_lock);
@@ -2429,7 +2441,6 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 
   applog(LOG_DEBUG, "swab256_target: %s", bin2hex(pool->gbt_target,32));
 
-  pool->gbt_expires = expires;
   pool->gbt_version = htobe32(version);
   pool->curtime = htobe32(curtime);
   pool->submit_old = submitold;
@@ -3346,37 +3357,46 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
       endian_flip128(work->data, work->data);
 
     /* build hex string - Make sure to restrict to 80 bytes for Neoscrypt */
-    int datasize = 128;
+    int datasize = 80;
     if (work->pool->algorithm.type == ALGO_NEOSCRYPT)
       datasize = 80;
     else if (work->pool->algorithm.type == ALGO_CRE)
       datasize = 168;
-    hexstr = bin2hex(work->data, datasize);
+    else if (work->pool->algorithm.type == ALGO_LBRY)
+      datasize = 112;
 
     /* build JSON-RPC request */
     if (work->gbt) {
       char *gbt_block, *varint;
-      unsigned char data[80];
 
-      flip80(data, work->data);
-      gbt_block = bin2hex(data, 80);
+      if (datasize == 80)
+        flip80(work->data, work->data);
+      else if (datasize == 112)
+        flip112(work->data, work->data);
+      else if (datasize == 128)
+        flip128(work->data, work->data);
+      else if (datasize == 168)
+        flip168(work->data, work->data);
+      else
+          applog_and_exit("Unimplemented flip handler for %d", datasize);
+      gbt_block = bin2hex(work->data, datasize);
 
       if (work->gbt_txns < 0xfd) {
-        uint8_t val = work->gbt_txns;
+        uint8_t valx = work->gbt_txns;
 
-        varint = bin2hex((const unsigned char *)&val, 1);
+        varint = bin2hex((const unsigned char *)&valx, 1);
       }
       else if (work->gbt_txns <= 0xffff) {
-        uint16_t val = htole16(work->gbt_txns);
+        uint16_t valx = htole16(work->gbt_txns);
 
         gbt_block = (char *)realloc_strcat(gbt_block, "fd");
-        varint = bin2hex((const unsigned char *)&val, 2);
+        varint = bin2hex((const unsigned char *)&valx, 2);
       }
       else {
-        uint32_t val = htole32(work->gbt_txns);
+        uint32_t valx = htole32(work->gbt_txns);
 
         gbt_block = (char *)realloc_strcat(gbt_block, "fe");
-        varint = bin2hex((const unsigned char *)&val, 4);
+        varint = bin2hex((const unsigned char *)&valx, 4);
       }
       gbt_block = (char *)realloc_strcat(gbt_block, varint);
       free(varint);
@@ -3395,7 +3415,9 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
     }
     else {
       s = strdup("{\"method\": \"getwork\", \"params\": [ \"");
+      hexstr = bin2hex(work->data, MAX(datasize, 128));
       s = (char *)realloc_strcat(s, hexstr);
+      free(hexstr);
       s = (char *)realloc_strcat(s, "\" ], \"id\":1}");
     }
   }
@@ -3409,7 +3431,7 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
   free(s);
 
   if (unlikely(!val)) {
-    applog(LOG_INFO, "submit_upstream_work json_rpc_call failed");
+    applog(LOG_INFO, "submit_upstream_work json_rpc_call failed. Error: %s", curl_err_str);
     if (!pool_tset(pool, &pool->submit_fail)) {
       total_ro++;
       pool->remotefail_occasions++;
@@ -3502,7 +3524,6 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
 
   rc = true;
 out:
-  free(hexstr);
   return rc;
 }
 
@@ -6026,6 +6047,9 @@ static void *stratum_sthread(void *userdata)
       free(nonce);
       free(solution);
     }
+    else if (pool->algorithm.type == ALGO_LBRY) {
+		nonce = *((uint32_t *)(work->data + 108));
+	}
     else {
       if (unlikely(work->nonce2_len > 8)) {
         applog(LOG_ERR, "%s asking for inappropriately long nonce2 length %d", get_pool_name(pool), (int)work->nonce2_len);
@@ -7494,7 +7518,8 @@ static void rebuild_nonce(struct work *work, uint32_t nonce)
     nonce_pos = 140;
   else if (work->pool->algorithm.type == ALGO_CRYPTONIGHT)
     nonce_pos = 39;
-
+  else if(work->pool->algorithm.type == ALGO_LBRY) 
+    nonce_pos = 108;
   if (work->pool->algorithm.type == ALGO_ETHASH) {
     work->Nonce += nonce;
   }

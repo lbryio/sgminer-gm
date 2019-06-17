@@ -85,6 +85,7 @@ sgminer_SOURCES += algorithm/ethash.c algorithm/ethgencache.c algorithm/ethash.h
 sgminer_SOURCES += algorithm/cryptonight.c algorithm/cryptonight.h algorithm/cn-aes-tbls.h
 sgminer_SOURCES += algorithm/equihash.c algorithm/equihash.h
 sgminer_SOURCES += gbt-util.c gbt-util.h
+sgminer_SOURCES += algorithm/lbry.c algorithm/lbry.h
 
 bin_SCRIPTS	= $(top_srcdir)/kernel/*.cl
 

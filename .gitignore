@@ -1,7 +1,4 @@
-cgminer
-cgminer.exe
-minerd
-minerd.exe
+*.a
 *.o
 *.lo
 *.bin
@@ -45,3 +42,21 @@ lib/warn-on-use.h
 mkinstalldirs
 
 *.swp
+
+\.idea/
+cmake-build-*/
+**/\.dirstamp
+
+sgminer
+libtool
+ltmain\.sh
+
+m4/libtool\.m4
+
+m4/lt~obsolete\.m4
+
+m4/ltoptions\.m4
+
+m4/ltsugar\.m4
+
+m4/ltversion\.m4
