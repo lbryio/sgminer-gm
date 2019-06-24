@@ -2371,6 +2371,8 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     applog(LOG_DEBUG, "target: %s", target);
   if (coinbasetxn)
     applog(LOG_DEBUG, "coinbasetxn: %s", coinbasetxn);
+  else
+    applog(LOG_WARNING, "coinbasetxn is invalid, make sure you're connected to node with wallet enabled");
   if (longpollid)
     applog(LOG_DEBUG, "longpollid: %s", longpollid);
   applog(LOG_DEBUG, "version: %d", version);
