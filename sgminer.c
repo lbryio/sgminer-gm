@@ -8769,7 +8769,7 @@ static void enable_curses_windows(void)
   getmaxyx(mainwin, y, x);
   statuswin = newwin(logstart, x, 0, 0);
   leaveok(statuswin, true);
-  logwin = newwin(y - logcursor, 0, logcursor, 0);
+  logwin = newwin(abs(y - logcursor), 0, logcursor, 0);
   idlok(logwin, true);
   scrollok(logwin, true);
   leaveok(logwin, true);
