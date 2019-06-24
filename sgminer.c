@@ -2314,7 +2314,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
   work->work_block = work_block;
   /* Nominally allow a driver to ntime roll 60 seconds */
   work->drv_rolllimit = 0;
-  //calc_diff(work, 0);
+  calc_diff(work, 0);
   cgtime(&work->tv_staged);
 }
 
