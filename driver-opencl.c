@@ -224,7 +224,7 @@ char *set_gpu_map(char *arg)
     return "Invalid parameters for set gpu map";
   if (sscanf(arg, "%d:%d", &val1, &val2) != 2)
     return "Invalid description for map pair";
-  if (val1 < 0 || val1 > MAX_GPUDEVICES || val2 < 0 || val2 > MAX_GPUDEVICES)
+  if (val1 < 0 || val1 >= MAX_GPUDEVICES || val2 < 0 || val2 >= MAX_GPUDEVICES)
     return "Invalid value passed to set_gpu_map";
 
   gpus[val1].virtual_adl = val2;
@@ -233,7 +233,7 @@ char *set_gpu_map(char *arg)
   while ((nextptr = strtok(NULL, ",")) != NULL) {
     if (sscanf(nextptr, "%d:%d", &val1, &val2) != 2)
       return "Invalid description for map pair";
-    if (val1 < 0 || val1 > MAX_GPUDEVICES || val2 < 0 || val2 > MAX_GPUDEVICES)
+    if (val1 < 0 || val1 >= MAX_GPUDEVICES || val2 < 0 || val2 >= MAX_GPUDEVICES)
       return "Invalid value passed to set_gpu_map";
     gpus[val1].virtual_adl = val2;
     gpus[val1].mapped = true;
