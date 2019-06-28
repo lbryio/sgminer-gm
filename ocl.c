@@ -252,15 +252,18 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
 
   // sanity check
   if (!get_opencl_platform(opt_platform_id, &platform)) {
+    free(clState);
     return NULL;
   }
 
   if (numDevices <= 0) {
+    free(clState);
     return NULL;
   }
 
   if (gpu >= numDevices) {
     applog(LOG_ERR, "Invalid GPU %i", gpu);
+    free(clState);
     return NULL;
   }
 
@@ -269,6 +272,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
 
   status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices, NULL);
   if (status != CL_SUCCESS) {
+    free(clState);
     applog(LOG_ERR, "Error %d: Getting Device IDs (list)", status);
     return NULL;
   }

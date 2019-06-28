@@ -1669,63 +1669,73 @@ static bool parse_notify(struct pool *pool, json_t *val)
     return parse_notify_equihash(pool, val);
   }
   
-  char *job_id, *prev_hash, *coinbase1, *coinbase2, *bbversion, *nbit,
-       *ntime, *header;
+  char *job_id = NULL, *prev_hash = NULL, *coinbase1 = NULL,
+    *coinbase2 = NULL, *bbversion = NULL, *nbit = NULL,
+    *ntime = NULL, *header = NULL, *trie = NULL;
+
   size_t cb1_len, cb2_len, alloc_len;
   unsigned char *cb1, *cb2;
-  bool clean, ret = false;
+  bool clean, ret = false, has_trie;
   int merkles, i;
-  json_t *arr;
+  json_t *arr = NULL;
 
-  arr = json_array_get(val, 4);
+  has_trie = json_array_size(val) == 10;
+
+  applog(LOG_DEBUG, "has_trie = %d", has_trie);
+
+  i = 0;
+  job_id = json_array_string(val, i++);
+  prev_hash = json_array_string(val, i++);
+  if (has_trie) trie = json_array_string(val, i++);
+
+  coinbase1 = json_array_string(val, i++);
+  coinbase2 = json_array_string(val, i++);
+
+  arr = json_array_get(val, i++);
   if (!arr || !json_is_array(arr))
-    goto out;
+      goto free_all;
 
-  merkles = json_array_size(arr);
+  bbversion = json_array_string(val, i++);
+  nbit = json_array_string(val, i++);
+  ntime = json_array_string(val, i++);
+  clean = json_is_true(json_array_get(val, i));
 
-  job_id = json_array_string(val, 0);
-  prev_hash = json_array_string(val, 1);
-  coinbase1 = json_array_string(val, 2);
-  coinbase2 = json_array_string(val, 3);
-  bbversion = json_array_string(val, 5);
-  nbit = json_array_string(val, 6);
-  ntime = json_array_string(val, 7);
-  clean = json_is_true(json_array_get(val, 8));
-
-  if (!job_id || !prev_hash || !coinbase1 || !coinbase2 || !bbversion || !nbit || !ntime) {
-    /* Annoying but we must not leak memory */
-    free(job_id);
-    free(prev_hash);
-    free(coinbase1);
-    free(coinbase2);
-    free(bbversion);
-    free(nbit);
-    free(ntime);
-    goto out;
-  }
+  if (!job_id || !prev_hash || !coinbase1 || !coinbase2 || !bbversion || !nbit || !ntime)
+    goto free_all;
 
   cg_wlock(&pool->data_lock);
+
+  // free previously owned arrays
   free(pool->swork.job_id);
   free(pool->swork.prev_hash);
   free(pool->swork.bbversion);
   free(pool->swork.nbit);
   free(pool->swork.ntime);
+
+  if (has_trie) hex2bin(pool->swork.trie, trie, 32);
+  pool->swork.has_trie = has_trie;
+
+  // own arrays for use
   pool->swork.job_id = job_id;
   pool->swork.prev_hash = prev_hash;
-  cb1_len = strlen(coinbase1) / 2;
-  cb2_len = strlen(coinbase2) / 2;
   pool->swork.bbversion = bbversion;
   pool->swork.nbit = nbit;
   pool->swork.ntime = ntime;
   pool->swork.clean = clean;
+
   if (pool->next_diff > 0) {
     pool->swork.diff = pool->next_diff;
   }
+  cb1_len = strlen(coinbase1) / 2;
+  cb2_len = strlen(coinbase2) / 2;
   alloc_len = pool->swork.cb_len = cb1_len + pool->n1_len + pool->n2size + cb2_len;
   pool->nonce2_offset = cb1_len + pool->n1_len;
 
   for (i = 0; i < pool->swork.merkles; i++)
     free(pool->swork.merkle_bin[i]);
+
+  merkles = json_array_size(arr);
+
   if (merkles) {
     pool->swork.merkle_bin = (unsigned char **)realloc(pool->swork.merkle_bin,
              sizeof(char *) * merkles + 1);
@@ -1742,32 +1752,55 @@ static bool parse_notify(struct pool *pool, json_t *val)
   pool->swork.merkles = merkles;
   if (clean)
     pool->nonce2 = 0;
-  pool->merkle_offset = strlen(pool->swork.bbversion) +
-            strlen(pool->swork.prev_hash);
-  pool->swork.header_len = pool->merkle_offset +
-  /* merkle_hash */  32 +
+  pool->merkle_offset = strlen(pool->swork.bbversion) + strlen(pool->swork.prev_hash);
+
+  if (has_trie) {
+    pool->swork.header_len = pool->merkle_offset + 32 + 32 + strlen(pool->swork.ntime) + strlen(pool->swork.nbit) + 8 + 96;
+    pool->merkle_offset /= 2;
+    pool->swork.header_len = pool->swork.header_len * 2 + 1;
+    align_len(&pool->swork.header_len);
+    header = (char *)alloca(pool->swork.header_len);
+
+    snprintf(header, pool->swork.header_len,
+      "%s%s%s%s%s%s%s%s",
+      pool->swork.bbversion,
+      pool->swork.prev_hash,
+      blank_merkel,
+      trie,
+      pool->swork.ntime,
+      pool->swork.nbit,
+      "00000000", /* nonce */
+      workpadding);
+    if (unlikely(!hex2bin(pool->header_bin, header, strlen(header) / 2))) {
+      applog(LOG_WARNING, "%s: Failed to convert header to header_bin, got %s", __func__, header);
+      pool_failed(pool);
+      goto free_all;
+    }
+ } else {
+    pool->swork.header_len = pool->merkle_offset +
+    /* merkle_hash */  32 +
          strlen(pool->swork.ntime) +
          strlen(pool->swork.nbit) +
-  /* nonce */    8 +
-  /* workpadding */  96;
-  pool->merkle_offset /= 2;
-  pool->swork.header_len = pool->swork.header_len * 2 + 1;
-  align_len(&pool->swork.header_len);
-  header = (char *)alloca(pool->swork.header_len);
-  snprintf(header, pool->swork.header_len,
-    "%s%s%s%s%s%s%s",
-    pool->swork.bbversion,
-    pool->swork.prev_hash,
-    blank_merkel,
-    pool->swork.ntime,
-    pool->swork.nbit,
-    "00000000", /* nonce */
-    workpadding);
-  if (unlikely(!hex2bin(pool->header_bin, header, 128))) {
-    applog(LOG_WARNING, "%s: Failed to convert header to header_bin, got %s", __func__, header);
-    pool_failed(pool);
-    // TODO: memory leaks? goto out, clean up there?
-    return false;
+    /* nonce */    8 +
+    /* workpadding */  96;
+    pool->merkle_offset /= 2;
+    pool->swork.header_len = pool->swork.header_len * 2 + 1;
+    align_len(&pool->swork.header_len);
+    header = (char *)alloca(pool->swork.header_len);
+    snprintf(header, pool->swork.header_len,
+      "%s%s%s%s%s%s%s",
+      pool->swork.bbversion,
+      pool->swork.prev_hash,
+      blank_merkel,
+      pool->swork.ntime,
+      pool->swork.nbit,
+      "00000000", /* nonce */
+      workpadding);
+    if (unlikely(!hex2bin(pool->header_bin, header, strlen(header) / 2))) {
+      applog(LOG_WARNING, "%s: Failed to convert header to header_bin, got %s", __func__, header);
+      pool_failed(pool);
+      goto free_all;
+    }
   }
 
   cb1 = (unsigned char *)calloc(cb1_len, 1);
@@ -1801,10 +1834,13 @@ static bool parse_notify(struct pool *pool, json_t *val)
     applog(LOG_DEBUG, "ntime: %s", ntime);
     applog(LOG_DEBUG, "clean: %s", clean ? "yes" : "no");
   }
+
+  // free not needed arrays
   free(coinbase1);
   free(coinbase2);
   free(cb1);
   free(cb2);
+  if (trie) free(trie);
 
   /* A notify message is the closest stratum gets to a getwork */
   pool->getwork_requested++;
@@ -1812,7 +1848,18 @@ static bool parse_notify(struct pool *pool, json_t *val)
   ret = true;
   if (pool == current_pool())
     opt_work_update = true;
-out:
+  return ret;
+free_all:
+  // header does not need to be free'd
+  if (arr) free(arr);
+  if (trie) free(trie);
+  if (nbit) free(nbit);
+  if (ntime) free(ntime);
+  if (job_id) free(job_id);
+  if (prev_hash) free(prev_hash);
+  if (coinbase1) free(coinbase1);
+  if (coinbase2) free(coinbase2);
+  if (bbversion) free(bbversion);
   return ret;
 }
 
