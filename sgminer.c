@@ -6049,9 +6049,6 @@ static void *stratum_sthread(void *userdata)
       free(nonce);
       free(solution);
     }
-    else if (pool->algorithm.type == ALGO_LBRY) {
-		nonce = *((uint32_t *)(work->data + 108));
-	}
     else {
       if (unlikely(work->nonce2_len > 8)) {
         applog(LOG_ERR, "%s asking for inappropriately long nonce2 length %d", get_pool_name(pool), (int)work->nonce2_len);
@@ -6070,6 +6067,8 @@ static void *stratum_sthread(void *userdata)
       // Neoscrypt is little endian
       if (pool->algorithm.type == ALGO_NEOSCRYPT)
         nonce = htobe32(*((uint32_t *)(work->data + 76)));
+      else if (pool->algorithm.type == ALGO_LBRY)
+        nonce = *((uint32_t *)(work->data + 108));
       else
         nonce = *((uint32_t *)(work->data + 76));
 
@@ -6146,7 +6145,7 @@ static void *stratum_sthread(void *userdata)
     }
 
     if (unlikely(!submitted)) {
-      applog(LOG_DEBUG, "Failed to submit stratum share, discarding");
+      applog(LOG_NOTICE, "Failed to submit stratum share, discarding");
       free_work(work);
       free(sshare);
       pool->stale_shares++;

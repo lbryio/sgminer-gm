@@ -1755,14 +1755,14 @@ static bool parse_notify(struct pool *pool, json_t *val)
   pool->merkle_offset = strlen(pool->swork.bbversion) + strlen(pool->swork.prev_hash);
 
   if (has_trie) {
-    pool->swork.header_len = pool->merkle_offset + 32 + 32 + strlen(pool->swork.ntime) + strlen(pool->swork.nbit) + 8 + 96;
+    pool->swork.header_len = pool->merkle_offset + 32 + 32 + strlen(pool->swork.ntime) + strlen(pool->swork.nbit) + 8 + 64;
     pool->merkle_offset /= 2;
     pool->swork.header_len = pool->swork.header_len * 2 + 1;
     align_len(&pool->swork.header_len);
     header = (char *)alloca(pool->swork.header_len);
 
     snprintf(header, pool->swork.header_len,
-      "%s%s%s%s%s%s%s%s",
+      "%s%s%s%s%s%s%s%.32s",
       pool->swork.bbversion,
       pool->swork.prev_hash,
       blank_merkel,
