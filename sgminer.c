@@ -2178,13 +2178,14 @@ static double get_work_blockdiff(const struct work *work)
     diff64 = bswap_64(((uint64_t)(be32toh(*((uint32_t *)(work->data + 72))) & 0xFFFFFF00)) << 8);
     numerator = (double)work->pool->algorithm.diff_numerator;
   }
-  if (work->pool->algorithm.type == ALGO_ETHASH) {
+  else if (work->pool->algorithm.type == ALGO_ETHASH) {
     return 0;//work->network_diff;
   }
   else {
-    uint8_t pow = work->data[72];
-    int powdiff = (8 * (0x1d - 3)) - (8 * (pow - 3));;
-    diff64 = be32toh(*((uint32_t *)(work->data + 72))) & 0x0000000000FFFFFF;
+    int offset = work->pool->algorithm.type == ALGO_LBRY ? 104 : 72;
+    uint8_t pow = work->data[offset];
+    int powdiff = (8 * (0x1d - 3)) - (8 * (pow - 3));
+    diff64 = be32toh(*((uint32_t *)(work->data + offset))) & 0x0000000000FFFFFF;
     numerator = work->pool->algorithm.diff_numerator << powdiff;
   }
 
