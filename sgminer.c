@@ -100,6 +100,7 @@ static bool on_backup_pool = false; //for simple connect strategy... flag if we'
 bool opt_work_update;
 bool opt_protocol;
 bool have_longpoll;
+bool have_segwit;
 bool want_per_device_stats;
 bool use_syslog;
 bool opt_quiet;
@@ -2031,6 +2032,7 @@ char *workpadding = "00000080000000000000000000000000000000000000000000000000000
  * entered under gbt_lock */
 static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
 {
+  uint8_t bin[32];
   json_t *txn_array;
   bool ret = false;
   size_t cal_len;
@@ -2058,9 +2060,8 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
       json_t *array_elem = json_array_get(txn_array, i);
       json_t *txn_hash_val = json_object_get(array_elem, "hash");
       const char *txn_hash = json_string_value(txn_hash_val);
-      uint8_t bin_hash[32];
-      hex2bin(bin_hash, txn_hash, 32);
-      swab256(pool->txn_hashes + 32 * i, bin_hash);
+      hex2bin(bin, txn_hash, 32);
+      swab256(pool->txn_hashes + 32 * i, bin);
 
       json_t *txn_val = json_object_get(array_elem, "data");
       const char *txn = json_string_value(txn_val);
@@ -2075,6 +2076,13 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
   if (!pool->gbt_txns)
     goto out;
 
+  if (have_segwit)
+  for (i = 0; i < pool->gbt_txns; i++) {
+    json_t *array_elem = json_array_get(txn_array, i);
+    json_t *txid = json_object_get(array_elem, "txid");
+    hex2bin(bin, json_string_value(txid), 32);
+    swap256(pool->txn_hashes + 32 * i, bin);
+  } else
   for (i = 0; i < pool->gbt_txns; i++) {
     json_t *txn_val = json_object_get(json_array_get(txn_array, i), "data");
     const char *txn = json_string_value(txn_val);
@@ -2319,16 +2327,43 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
   cgtime(&work->tv_staged);
 }
 
+int ser_number(unsigned char *s, int32_t val)
+{
+  int32_t *i32 = (int32_t *)&s[1];
+  int len;
+
+  if (val < 17) {
+    s[0] = 0x50 + val;
+    return 1;
+  }
+  if (val < 128)
+    len = 1;
+  else if (val < 32768)
+    len = 2;
+  else if (val < 8388608)
+    len = 3;
+  else
+    len = 4;
+  *i32 = htole32(val);
+  s[0] = len++;
+  return len;
+}
+
+static const char scriptsig_header[] = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
+
 static bool gbt_decode(struct pool *pool, json_t *res_val)
 {
+  json_t* tmp;
+  struct timeval now;
   const char *previousblockhash;
+  const char *flags;
   const char *target;
   const char *coinbasetxn;
   const char *longpollid;
   const char *reserved;
   unsigned char hash_swap[32];
-  int version;
-  int curtime;
+  int version, i;
+  int curtime, n;
   bool submitold;
   const char *bits;
   const char *workid;
@@ -2350,12 +2385,13 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   submitold = json_is_true(json_object_get(res_val, "submitold"));
   bits = json_string_value(json_object_get(res_val, "bits"));
   workid = json_string_value(json_object_get(res_val, "workid"));
+  height = json_integer_value(json_object_get(res_val, "height"));
+  flags = json_string_value(json_object_get(json_object_get(res_val, "coinbaseaux"), "flags"));
+  coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
 
   bool invalid = false;
   if (pool->algorithm.type == ALGO_EQUIHASH) {
     applog(LOG_DEBUG, "USING EQUIHASH");
-    height = json_integer_value(json_object_get(res_val, "height"));
-    coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
     coinbasefrvalue = json_integer_value(json_object_get(res_val, "coinbasefrvalue"));
     coinbasefrscript = json_string_value(json_object_get(res_val, "coinbasefrscript"));
     invalid = (!previousblockhash || !target || !coinbasevalue || !height || !longpollid || !version || !curtime || !bits);
@@ -2392,6 +2428,19 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 
   cg_wlock(&pool->gbt_lock);
 
+  have_segwit = false;
+  tmp = json_object_get(res_val, "rules");
+  if (tmp && json_is_array(tmp)) {
+    n = json_array_size(tmp);
+    for (i = 0; !have_segwit && i < n; i++) {
+      const char *s = json_string_value(json_array_get(tmp, i));
+      if (!s)
+        continue;
+      if (!strcmp(s, "segwit") || !strcmp(s, "!segwit"))
+        have_segwit = true;
+    }
+  }
+
   if (pool->algorithm.type == ALGO_EQUIHASH) {
     pool->n2size = 8;
     if (!set_coinbasetxn(pool, height, coinbasevalue, coinbasefrvalue, coinbasefrscript)) {
@@ -2400,26 +2449,105 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     }
   }
   else {
+    int offset = 42, len;
+    unsigned char script_size, bin_value[44];
+    if (strncmp(coinbasetxn, "01000000", 8) && strncmp(coinbasetxn + 8, "0001", 4) == 0)
+        offset += 2;
+    free(pool->coinbase);
     free(pool->coinbasetxn);
     pool->coinbasetxn = strdup(coinbasetxn);
-    cbt_len = strlen(pool->coinbasetxn) / 2;
-    /* We add 8 bytes of extra data corresponding to nonce2 */
-    pool->n2size = 8;
-    pool->coinbase_len = cbt_len + pool->n2size;
-    cal_len = pool->coinbase_len + 1;
-    align_len(&cal_len);
-    free(pool->coinbase);
-    pool->coinbase = (unsigned char *)calloc(cal_len, 1);
-    if (unlikely(!pool->coinbase))
-      quit(1, "Failed to calloc pool coinbase in gbt_decode");
-    hex2bin(pool->coinbase, pool->coinbasetxn, 42);
-    extra_len = (uint8_t *)(pool->coinbase + 41);
-    orig_len = *extra_len;
-    hex2bin(pool->coinbase + 42, pool->coinbasetxn + 84, orig_len);
-    *extra_len += pool->n2size;
-    hex2bin(pool->coinbase + 42 + *extra_len, pool->coinbasetxn + 84 + (orig_len * 2),
-      cbt_len - orig_len - 42);
-    pool->nonce2_offset = orig_len + 42;
+    hex2bin(bin_value, pool->coinbasetxn, offset);
+    extra_len = (uint8_t *)(bin_value + offset - 1);
+    if (have_segwit) {
+      uint64_t *u64;
+	  uint32_t *u32;
+      int txout_size, witnessdata_size, txout_start, witnessdata_start, ofs = 0;
+      len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
+      hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
+      txout_start = len + 1;
+      txout_size = script_size;
+      len += txout_size + 8 + 1;
+      hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
+      witnessdata_size = script_size;
+      witnessdata_start = len + 1;
+      unsigned char scriptsig_base[64] = {0};
+      ofs++; // Leave room for template length
+
+      /* Put block height at start of template. */
+      ofs += ser_number(scriptsig_base + ofs, height); // max 5
+
+      /* Followed by flags */
+      len = strlen(flags) / 2;
+      scriptsig_base[ofs++] = len;
+      hex2bin(scriptsig_base + ofs, flags, len);
+      ofs += len;
+
+      /* Followed by timestamp */
+      cgtime(&now);
+      scriptsig_base[ofs++] = 0xfe; // Encode seconds as u32
+      u32 = (uint32_t *)&scriptsig_base[ofs];
+      *u32 = htole32(now.tv_sec);
+      ofs += 4; // sizeof uint32_t
+      scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
+      u32 = (uint32_t *)&scriptsig_base[ofs];
+      *u32 = htole32(now.tv_usec);
+      ofs += 4; // sizeof uint32_t
+
+      memcpy(scriptsig_base + ofs, "\x09\x63\x67\x6d\x69\x6e\x65\x72\x34\x32", 10);
+      ofs += 10;
+
+      /* Followed by extranonce size, fixed at 8 */
+      scriptsig_base[ofs++] = 8;
+      pool->nonce2_offset = 41 + ofs;
+      ofs += 8;
+
+      scriptsig_base[0] = ofs++; // Template length
+      pool->n1_len = ofs;
+
+      len = 41 // prefix
+        + ofs // Template length
+        + 4 // txin sequence no
+        + 1 // txouts
+        + 8 // value
+        + 1 + txout_size // txout
+        + 4 // lock
+        + 8 //value
+        + 1 + witnessdata_size; // total scriptPubKey size + OP_RETURN + push size + data
+
+      pool->coinbase = calloc(len, 1);
+      hex2bin(pool->coinbase, scriptsig_header, 41);
+      pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = txout_size;
+      hex2bin(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, pool->coinbasetxn + (txout_start * 2), txout_size);
+      memcpy(pool->coinbase + 41, scriptsig_base, ofs);
+      memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
+      pool->coinbase[41 + ofs + 4] = 2;
+      u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
+      *u64 = htole64(coinbasevalue);
+      ofs += 41 + 4 + 1 + 8 + 1 + txout_size;
+      memset(pool->coinbase + ofs, 0, 8);
+      pool->coinbase[ofs + 8] = witnessdata_size;
+      hex2bin(pool->coinbase + ofs + 8 + 1, pool->coinbasetxn + (witnessdata_start * 2), witnessdata_size);
+      witnessdata_size += 9;
+      pool->nonce2 = 0;
+      pool->n2size = 4;
+      pool->coinbase_len = ofs + witnessdata_size + 4;
+    } else {
+      cbt_len = strlen(pool->coinbasetxn) / 2;
+      /* We add 8 bytes of extra data corresponding to nonce2 */
+      pool->n2size = 8;
+      pool->coinbase_len = cbt_len + pool->n2size;
+      cal_len = pool->coinbase_len + 1;
+      align_len(&cal_len);
+      pool->coinbase = (unsigned char *)calloc(cal_len, 1);
+      memcpy(pool->coinbase, bin_value, offset);
+      extra_len = (uint8_t *)(pool->coinbase + offset - 1);
+      orig_len = *extra_len;
+      hex2bin(pool->coinbase + offset, pool->coinbasetxn + (offset * 2), orig_len);
+      *extra_len += pool->n2size;
+      hex2bin(pool->coinbase + offset + *extra_len, pool->coinbasetxn + (offset * 2) + (orig_len * 2),
+        cbt_len - orig_len - offset);
+      pool->nonce2_offset = orig_len + offset;
+    }
   }
 
   free(pool->longpollid);
@@ -2441,8 +2569,6 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 
   hex2bin(hash_swap, target, 32);
   swab256(pool->gbt_target, hash_swap);
-
-  applog(LOG_DEBUG, "swab256_target: %s", bin2hex(pool->gbt_target,32));
 
   pool->gbt_version = htobe32(version);
   pool->curtime = htobe32(curtime);
@@ -8027,7 +8153,7 @@ retry_pool:
         snprintf(lpreq, sizeof(lpreq),
           "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": "
           "[{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"], "
-          "\"longpollid\": \"%s\"}]}\n", pool->longpollid);
+          "\"rules\": [\"segwit\"], \"longpollid\": \"%s\"}]}\n", pool->longpollid);
       cg_runlock(&pool->gbt_lock);
     }
 
