@@ -536,9 +536,8 @@ static void sharelog(const char*disposition, const struct work*work)
 
 static char *getwork_req = "{\"method\": \"getwork\", \"params\": [], \"id\":0}\n";
 
-static char *gbt_req = "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
-
-static char *gbt_req_equihash = "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasevalue\", \"workid\", \"longpoll\"]}]}\n";
+static char *gbt_req = "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": [{\"rules\": [\"segwit\"], "
+                       "\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
 
 /* Adjust all the pools' quota to the greatest common denominator after a pool
  * has been added or the quotas changed. */
@@ -2053,26 +2052,6 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
   if (unlikely(!pool->txn_hashes))
     quit(1, "Failed to calloc txn_hashes in __build_gbt_txns");
 
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
-    pool->coinbasetxn = realloc(pool->coinbasetxn, 1 << 22);  // reuse coinbasetxn
-    size_t len = 0;
-    for (i = 0; i < pool->gbt_txns; i++) {
-      json_t *array_elem = json_array_get(txn_array, i);
-      json_t *txn_hash_val = json_object_get(array_elem, "hash");
-      const char *txn_hash = json_string_value(txn_hash_val);
-      hex2bin(bin, txn_hash, 32);
-      swab256(pool->txn_hashes + 32 * i, bin);
-
-      json_t *txn_val = json_object_get(array_elem, "data");
-      const char *txn = json_string_value(txn_val);
-      size_t txn_len = strlen(txn);
-      memcpy(pool->coinbasetxn + len, txn, txn_len + 1);
-      len += txn_len;
-    }
-    applog(LOG_DEBUG, "gbt_txns: %s", pool->coinbasetxn);
-    goto out;
-  }
-  
   if (!pool->gbt_txns)
     goto out;
 
@@ -2227,23 +2206,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 
   offsetMerkleRoot = 4 + 32;
 
-  /* Equihash is Version (4) + PrevblockHash (32) + Merkleroot (32) + Reserved (32) + CurTime (4) + nBits (4) + Nonce (32) + SolutionSize(3) + Solution (1344) */
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
-    offsetTime = offsetMerkleRoot + 32 + 32;
-    headerLen = 143;
-    nonceLen = 32;
-    lenPadding = 0; //no padding
-
-    offsetBits = offsetTime + 4;
-    offsetNonce = offsetBits + 4;
-
-    //reserved - Not sure exactly what this is used for...
-    memcpy(work->data + offsetMerkleRoot + 32, pool->reserved, 32);
-
-    //set solutionsize - supposed to always be 1344
-    add_var_int(work->data + offsetNonce + 32, 1344);
-  }
-  else if (pool->algorithm.type == ALGO_LBRY) {
+  if (pool->algorithm.type == ALGO_LBRY) {
       headerLen = 112;
       offsetTime = 100;
       offsetBits = 104;
@@ -2287,16 +2250,6 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
   flip32(work->data + offsetMerkleRoot, merkleroot);
   free(merkleroot);
   memset(work->data + offsetNonce, 0, nonceLen); /* nonce */
-
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
-    //add entropy to nonce
-    memcpy(work->data + offsetNonce + 8, entropy, 12);
-    // Equihash is little endian -> swab32 first 140 bytes
-    for (int i = 0; i < 140; i += 4)
-      for (int j = 0; j < 4; j++)
-        work->equihash_data[i + j] = work->data[i + 3-j];
-    add_var_int(work->equihash_data + offsetNonce + 32, 1344);
-  }
 
   if (lenPadding > 0) {
     hex2bin(work->data + offsetPadding, workpadding, lenPadding);
@@ -2389,16 +2342,7 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   flags = json_string_value(json_object_get(json_object_get(res_val, "coinbaseaux"), "flags"));
   coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
 
-  bool invalid = false;
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
-    applog(LOG_DEBUG, "USING EQUIHASH");
-    coinbasefrvalue = json_integer_value(json_object_get(res_val, "coinbasefrvalue"));
-    coinbasefrscript = json_string_value(json_object_get(res_val, "coinbasefrscript"));
-    invalid = (!previousblockhash || !target || !coinbasevalue || !height || !longpollid || !version || !curtime || !bits);
-  }
-  else {
-    invalid = (!previousblockhash || !target || !coinbasetxn || !longpollid || !version || !curtime || !bits);
-  }
+  bool invalid =  (!previousblockhash || !target || !coinbasetxn || !longpollid || !version || !curtime || !bits);
 
   if (previousblockhash)
     applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
@@ -2441,113 +2385,104 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     }
   }
 
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
+  int offset = 42, len;
+  unsigned char script_size, bin_value[44];
+  if (strncmp(coinbasetxn, "01000000", 8) && strncmp(coinbasetxn + 8, "0001", 4) == 0)
+      offset += 2;
+  free(pool->coinbase);
+  free(pool->coinbasetxn);
+  pool->coinbasetxn = strdup(coinbasetxn);
+  hex2bin(bin_value, pool->coinbasetxn, offset);
+  extra_len = (uint8_t *)(bin_value + offset - 1);
+  if (have_segwit) {
+    uint64_t *u64;
+    uint32_t *u32;
+    int txout_size, witnessdata_size, txout_start, witnessdata_start, ofs = 0;
+    len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
+    hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
+    txout_start = len + 1;
+    txout_size = script_size;
+    len += txout_size + 8 + 1;
+    hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
+    witnessdata_size = script_size;
+    witnessdata_start = len + 1;
+    unsigned char scriptsig_base[64] = {0};
+    ofs++; // Leave room for template length
+
+    /* Put block height at start of template. */
+    ofs += ser_number(scriptsig_base + ofs, height); // max 5
+
+    /* Followed by flags */
+    len = strlen(flags) / 2;
+    scriptsig_base[ofs++] = len;
+    hex2bin(scriptsig_base + ofs, flags, len);
+    ofs += len;
+
+    /* Followed by timestamp */
+    cgtime(&now);
+    scriptsig_base[ofs++] = 0xfe; // Encode seconds as u32
+    u32 = (uint32_t *)&scriptsig_base[ofs];
+    *u32 = htole32(now.tv_sec);
+    ofs += 4; // sizeof uint32_t
+    scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
+    u32 = (uint32_t *)&scriptsig_base[ofs];
+    *u32 = htole32(now.tv_usec);
+    ofs += 4; // sizeof uint32_t
+
+    memcpy(scriptsig_base + ofs, "\x09\x63\x67\x6d\x69\x6e\x65\x72\x34\x32", 10);
+    ofs += 10;
+
+    /* Followed by extranonce size, fixed at 8 */
+    scriptsig_base[ofs++] = 8;
+    pool->nonce2_offset = 41 + ofs;
+    ofs += 8;
+
+    scriptsig_base[0] = ofs++; // Template length
+    pool->n1_len = ofs;
+
+    len = 41 // prefix
+      + ofs // Template length
+      + 4 // txin sequence no
+      + 1 // txouts
+      + 8 // value
+      + 1 + txout_size // txout
+      + 4 // lock
+      + 8 //value
+      + 1 + witnessdata_size; // total scriptPubKey size + OP_RETURN + push size + data
+
+    pool->coinbase = calloc(len, 1);
+    hex2bin(pool->coinbase, scriptsig_header, 41);
+    pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = txout_size;
+    hex2bin(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, pool->coinbasetxn + (txout_start * 2), txout_size);
+    memcpy(pool->coinbase + 41, scriptsig_base, ofs);
+    memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
+    pool->coinbase[41 + ofs + 4] = 2;
+    u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
+    *u64 = htole64(coinbasevalue);
+    ofs += 41 + 4 + 1 + 8 + 1 + txout_size;
+    memset(pool->coinbase + ofs, 0, 8);
+    pool->coinbase[ofs + 8] = witnessdata_size;
+    hex2bin(pool->coinbase + ofs + 8 + 1, pool->coinbasetxn + (witnessdata_start * 2), witnessdata_size);
+    witnessdata_size += 9;
+    pool->nonce2 = 0;
+    pool->n2size = 4;
+    pool->coinbase_len = ofs + witnessdata_size + 4;
+  } else {
+    cbt_len = strlen(pool->coinbasetxn) / 2;
+    /* We add 8 bytes of extra data corresponding to nonce2 */
     pool->n2size = 8;
-    if (!set_coinbasetxn(pool, height, coinbasevalue, coinbasefrvalue, coinbasefrscript)) {
-      cg_wunlock(&pool->gbt_lock);
-      return false;
-    }
-  }
-  else {
-    int offset = 42, len;
-    unsigned char script_size, bin_value[44];
-    if (strncmp(coinbasetxn, "01000000", 8) && strncmp(coinbasetxn + 8, "0001", 4) == 0)
-        offset += 2;
-    free(pool->coinbase);
-    free(pool->coinbasetxn);
-    pool->coinbasetxn = strdup(coinbasetxn);
-    hex2bin(bin_value, pool->coinbasetxn, offset);
-    extra_len = (uint8_t *)(bin_value + offset - 1);
-    if (have_segwit) {
-      uint64_t *u64;
-	  uint32_t *u32;
-      int txout_size, witnessdata_size, txout_start, witnessdata_start, ofs = 0;
-      len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
-      hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
-      txout_start = len + 1;
-      txout_size = script_size;
-      len += txout_size + 8 + 1;
-      hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
-      witnessdata_size = script_size;
-      witnessdata_start = len + 1;
-      unsigned char scriptsig_base[64] = {0};
-      ofs++; // Leave room for template length
-
-      /* Put block height at start of template. */
-      ofs += ser_number(scriptsig_base + ofs, height); // max 5
-
-      /* Followed by flags */
-      len = strlen(flags) / 2;
-      scriptsig_base[ofs++] = len;
-      hex2bin(scriptsig_base + ofs, flags, len);
-      ofs += len;
-
-      /* Followed by timestamp */
-      cgtime(&now);
-      scriptsig_base[ofs++] = 0xfe; // Encode seconds as u32
-      u32 = (uint32_t *)&scriptsig_base[ofs];
-      *u32 = htole32(now.tv_sec);
-      ofs += 4; // sizeof uint32_t
-      scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
-      u32 = (uint32_t *)&scriptsig_base[ofs];
-      *u32 = htole32(now.tv_usec);
-      ofs += 4; // sizeof uint32_t
-
-      memcpy(scriptsig_base + ofs, "\x09\x63\x67\x6d\x69\x6e\x65\x72\x34\x32", 10);
-      ofs += 10;
-
-      /* Followed by extranonce size, fixed at 8 */
-      scriptsig_base[ofs++] = 8;
-      pool->nonce2_offset = 41 + ofs;
-      ofs += 8;
-
-      scriptsig_base[0] = ofs++; // Template length
-      pool->n1_len = ofs;
-
-      len = 41 // prefix
-        + ofs // Template length
-        + 4 // txin sequence no
-        + 1 // txouts
-        + 8 // value
-        + 1 + txout_size // txout
-        + 4 // lock
-        + 8 //value
-        + 1 + witnessdata_size; // total scriptPubKey size + OP_RETURN + push size + data
-
-      pool->coinbase = calloc(len, 1);
-      hex2bin(pool->coinbase, scriptsig_header, 41);
-      pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = txout_size;
-      hex2bin(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, pool->coinbasetxn + (txout_start * 2), txout_size);
-      memcpy(pool->coinbase + 41, scriptsig_base, ofs);
-      memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
-      pool->coinbase[41 + ofs + 4] = 2;
-      u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
-      *u64 = htole64(coinbasevalue);
-      ofs += 41 + 4 + 1 + 8 + 1 + txout_size;
-      memset(pool->coinbase + ofs, 0, 8);
-      pool->coinbase[ofs + 8] = witnessdata_size;
-      hex2bin(pool->coinbase + ofs + 8 + 1, pool->coinbasetxn + (witnessdata_start * 2), witnessdata_size);
-      witnessdata_size += 9;
-      pool->nonce2 = 0;
-      pool->n2size = 4;
-      pool->coinbase_len = ofs + witnessdata_size + 4;
-    } else {
-      cbt_len = strlen(pool->coinbasetxn) / 2;
-      /* We add 8 bytes of extra data corresponding to nonce2 */
-      pool->n2size = 8;
-      pool->coinbase_len = cbt_len + pool->n2size;
-      cal_len = pool->coinbase_len + 1;
-      align_len(&cal_len);
-      pool->coinbase = (unsigned char *)calloc(cal_len, 1);
-      memcpy(pool->coinbase, bin_value, offset);
-      extra_len = (uint8_t *)(pool->coinbase + offset - 1);
-      orig_len = *extra_len;
-      hex2bin(pool->coinbase + offset, pool->coinbasetxn + (offset * 2), orig_len);
-      *extra_len += pool->n2size;
-      hex2bin(pool->coinbase + offset + *extra_len, pool->coinbasetxn + (offset * 2) + (orig_len * 2),
-        cbt_len - orig_len - offset);
-      pool->nonce2_offset = orig_len + offset;
-    }
+    pool->coinbase_len = cbt_len + pool->n2size;
+    cal_len = pool->coinbase_len + 1;
+    align_len(&cal_len);
+    pool->coinbase = (unsigned char *)calloc(cal_len, 1);
+    memcpy(pool->coinbase, bin_value, offset);
+    extra_len = (uint8_t *)(pool->coinbase + offset - 1);
+    orig_len = *extra_len;
+    hex2bin(pool->coinbase + offset, pool->coinbasetxn + (offset * 2), orig_len);
+    *extra_len += pool->n2size;
+    hex2bin(pool->coinbase + offset + *extra_len, pool->coinbasetxn + (offset * 2) + (orig_len * 2),
+      cbt_len - orig_len - offset);
+    pool->nonce2_offset = orig_len + offset;
   }
 
   free(pool->longpollid);
@@ -2561,7 +2496,6 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   hex2bin(hash_swap, previousblockhash, 32);
   swap256(pool->previousblockhash, hash_swap);
 
-  //equihash reserved currently all zeros but assuming it's supposed to be a reversed hash...
   if (reserved) {
     hex2bin(hash_swap, reserved, 32);
     swap256(pool->reserved, hash_swap);
@@ -3448,36 +3382,6 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
     free(ASCIINonce);
     free(ASCIIMixHash);
     free(ASCIIPoWHash);
-  }
-  else if(work->pool->algorithm.type == ALGO_EQUIHASH) {
-    /* equihash block: header (108) + nonce (32) + numbersolutions (3) + solution (1344) - total of 1487 , times 2 for hex string (2974) + json string (50) */
-    const int bin_len = sizeof(work->equihash_data);
-    char *result = bin2hex(work->equihash_data, bin_len);  // block header
-    const int len = 2*bin_len;
-    char workid[256];
-
-    workid[0] = 0;
-    /*
-    // not supported
-    if (work->job_id) {
-      snprintf(workid, sizeof(workid), ", {\"workid\": \"%s\"}", work->job_id);
-      str_len += strlen(workid);
-    }
-    */
-    
-    uint8_t txn_cnt_bin[9];
-    cg_rlock(&pool->gbt_lock);
-    int txn_cnt_len = add_var_int(txn_cnt_bin, pool->gbt_txns + 1);
-    char *txn_cnt = bin2hex(txn_cnt_bin, txn_cnt_len);
-    int str_len = len + 512 + strlen(pool->coinbasetxn);
-    s = (char *)malloc(sizeof(char) * str_len);
-
-    snprintf(s, str_len, "{\"id\": 0, \"method\": \"submitblock\", "
-      "\"params\": [\"%s%s%s%s\"%s]}", result, txn_cnt, work->coinbase, pool->coinbasetxn, workid);
-    cg_runlock(&pool->gbt_lock);
-    free(result);
-    free(txn_cnt);
-    applog(LOG_DEBUG, "submitblock: %s", s);
   }
   else {
     if (work->pool->algorithm.type == ALGO_CRE)
@@ -6151,31 +6055,6 @@ static void *stratum_sthread(void *userdata)
       free(ASCIINonce);
       free(ASCIIResult);
     }
-    else if(pool->algorithm.type == ALGO_EQUIHASH) {
-      char *nonce;
-      char *solution;
-
-      sshare->sshare_time = time(NULL);
-      /* This work item is freed in parse_stratum_response */
-      sshare->work = work;
-
-      applog(LOG_DEBUG, "stratum_sthread() algorithm = %s", pool->algorithm.name);
-      
-      //get nonce minus extranonce set by server
-      nonce = bin2hex(work->equihash_data+108, 32);
-      solution = bin2hex(work->equihash_data+140, 1347);
-      
-      //applog(LOG_DEBUG, "%s: Nonce set to %s", __func__, nonce+strlen(work->nonce1));
-      
-      mutex_lock(&sshare_lock);
-      /* Give the stratum share a unique id */
-      sshare->id = swork_id++;
-      mutex_unlock(&sshare_lock);
-      snprintf(s, s_size, "{\"id\": %d, \"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"]}", sshare->id, pool->rpc_user, work->job_id, work->ntime, nonce+strlen(work->nonce1), solution);
-
-      free(nonce);
-      free(solution);
-    }
     else {
       if (unlikely(work->nonce2_len > 8)) {
         applog(LOG_ERR, "%s asking for inappropriately long nonce2 length %d", get_pool_name(pool), (int)work->nonce2_len);
@@ -6366,13 +6245,11 @@ retry_stratum:
 
   if (!pool->probed) {
     char *_gbt_req = gbt_req;
-    if (pool->algorithm.type == ALGO_EQUIHASH)
-      _gbt_req = gbt_req_equihash;
     applog(LOG_DEBUG, "Probing for GBT support");
     val = json_rpc_call(curl, curl_err_str, pool->rpc_url, pool->rpc_userpass,
             _gbt_req, true, false, &rolltime, pool, false);
     if (val) {
-      bool append = false, submit = false;
+      bool append = false;
       json_t *res_val, *mutables;
       int i, mutsize = 0;
 
@@ -6390,16 +6267,11 @@ retry_stratum:
 
           if (!strncasecmp(mut, "coinbase/append", 15))
             append = true;
-          else if (!strncasecmp(mut, "submit/coinbase", 15))
-            submit = true;
         }
       }
       json_decref(val);
 
-      /* Only use GBT if it supports coinbase append and
-       * submit coinbase */
-
-      if ((append && submit) || pool->algorithm.type == ALGO_EQUIHASH) {
+      if (append) {
         pool->has_gbt = true;
         pool->rpc_req = _gbt_req;
       }
@@ -6459,10 +6331,6 @@ retry_stratum:
       copy_time(&work->tv_getwork, &tv_getwork);
       copy_time(&work->tv_getwork_reply, &tv_getwork_reply);
       work->getwork_mode = GETWORK_MODE_TESTPOOL;
-
-      if (pool->algorithm.type == ALGO_EQUIHASH) {
-        memcpy(work->target, pool->gbt_target, 32);
-      }
 
       calc_diff(work, 0);
       applog(LOG_DEBUG, "Pushing pooltest work to base pool");
@@ -6791,70 +6659,8 @@ static void gen_stratum_work_cn(struct pool *pool, struct work *work)
   applog(LOG_DEBUG, "gen_stratum_work_cn() done.");
 }
 
-static void gen_stratum_work_equihash(struct pool *pool, struct work *work)
-{
-  cg_wlock(&pool->data_lock);
-  work->nonce2 = pool->nonce2++;
-  work->nonce2_len = 2;
-
-  /* Downgrade to a read lock to read off the pool variables */
-  cg_dwlock(&pool->data_lock);
-  
-  /* equihash already has the merkle root in the header no need to change it */
-  memset(work->equihash_data, 0, 1487);
-  memcpy(work->equihash_data, pool->header_bin, 128);
-  
-  //add pool extra nonce
-  hex2bin(work->equihash_data + 108, pool->nonce1, strlen(pool->nonce1) / 2);
-  memcpy(work->equihash_data + 108 + 20 - work->nonce2_len, &work->nonce2, work->nonce2_len);
- 
-  //add solutionsize
-  add_var_int(work->equihash_data + 140, 1344);
-
-  /* Store the stratum work diff to check it still matches the pool's
-  * stratum diff when submitting shares */
-  work->sdiff = pool->swork.diff;
-
-  /* Copy parameters required for share submission */
-  work->job_id = strdup(pool->swork.job_id);
-  work->nonce1 = strdup(pool->nonce1);
-  work->ntime = strdup(pool->swork.ntime);
-  cg_runlock(&pool->data_lock);
-
-  if (opt_debug) {
-    char *header;
-
-    header = bin2hex(work->equihash_data, 143);
-    applog(LOG_DEBUG, "[THR%d] Generated stratum header %s", work->thr_id, header);
-    applog(LOG_DEBUG, "[THR%d] job_id %s, nonce1 %s, nonce2 %"PRIu64", ntime %s", work->thr_id, work->job_id, work->nonce1, work->nonce2, work->ntime);
-    free(header);
-  }
-
-  /* equihash validates on the network target not share target... */
-  memcpy(work->target, pool->Target, 32);
-
-  local_work++;
-  work->pool = pool;
-  work->stratum = true;
-  work->blk.nonce = 0;
-  work->id = total_work++;
-  work->longpoll = false;
-  work->getwork_mode = GETWORK_MODE_STRATUM;
-  work->work_block = work_block;
-  /* Nominally allow a driver to ntime roll 60 seconds */
-  work->drv_rolllimit = 60;
-  calc_diff(work, work->sdiff);
-
-  cgtime(&work->tv_staged);
-}
-
 static void gen_stratum_work(struct pool *pool, struct work *work)
 {
-  if (pool->algorithm.type == ALGO_EQUIHASH) {
-    gen_stratum_work_equihash(pool, work);
-    return;
-  }
-  
   unsigned char merkle_root[32], merkle_sha[64];
   uint32_t *data32, *swap32;
   uint64_t nonce2le;
@@ -7718,13 +7524,6 @@ bool submit_tested_work(struct thr_info *thr, struct work *work)
 
   if (work->pool->algorithm.type == ALGO_CRYPTONIGHT) {
   }
-  else if (work->pool->algorithm.type == ALGO_EQUIHASH) {
-    applog(LOG_DEBUG, "equihash target: %.16llx", *(uint64_t*) (work->target + 24));
-    if (*(uint64_t*) (work->hash + 24) > *(uint64_t*) (work->target + 24))
-      return false;
-    if (work->getwork_mode == GETWORK_MODE_GBT)
-      applog(LOG_WARNING, "Found zcash block!");
-  }
   else if (!fulltest(work->hash, work->target)) {
     applog(LOG_INFO, "%s %d: Share above target", thr->cgpu->drv->name,
            thr->cgpu->device_id);
@@ -7738,15 +7537,6 @@ bool submit_tested_work(struct thr_info *thr, struct work *work)
 /* Returns true if nonce for work was a valid share */
 bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce)
 {
-  //temporary
-  if (work->pool->algorithm.type == ALGO_EQUIHASH) {
-    struct work *work_out;
-    update_work_stats(thr, work);
-    work_out = copy_work(work);
-    submit_work_async(work_out);
-    return true;
-  }
-
   if (test_nonce(work, nonce)) {
     submit_tested_work(thr, work);
     return true;
@@ -7836,11 +7626,6 @@ static void hash_sole_work(struct thr_info *mythr)
 
     if (work->pool->algorithm.type == ALGO_NEOSCRYPT)
       set_target_neoscrypt(work->device_target, work->device_diff, work->thr_id);
-    else if (work->pool->algorithm.type != ALGO_EQUIHASH) {
-      if (work->pool->algorithm.type == ALGO_ETHASH)
-        work->device_diff = MIN(work->sdiff, 60e6);
-      set_target(work->device_target, work->device_diff, work->pool->algorithm.diff_multiplier2, work->thr_id);
-    }
 
     do {
       cgtime(&tv_start);
@@ -8144,16 +7929,10 @@ retry_pool:
      * avoid races */
     if (pool->has_gbt) {
       cg_rlock(&pool->gbt_lock);
-      if (pool->algorithm.type == ALGO_EQUIHASH)
-        snprintf(lpreq, sizeof(lpreq),
-          "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": "
-          "[{\"capabilities\": [\"coinbasevalue\", \"workid\", \"longpoll\"], "
-          "\"longpollid\": \"%s\"}]}\n", pool->longpollid);
-      else
-        snprintf(lpreq, sizeof(lpreq),
-          "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": "
-          "[{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"], "
-          "\"rules\": [\"segwit\"], \"longpollid\": \"%s\"}]}\n", pool->longpollid);
+      snprintf(lpreq, sizeof(lpreq),
+        "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": "
+        "[{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"], "
+        "\"rules\": [\"segwit\"], \"longpollid\": \"%s\"}]}\n", pool->longpollid);
       cg_runlock(&pool->gbt_lock);
     }
 
@@ -8161,8 +7940,6 @@ retry_pool:
      * and any number of issues could have come up in the meantime
      * so always establish a fresh connection instead of relying on
      * a persistent one. */
-    if (pool->algorithm.type != ALGO_EQUIHASH)
-      curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1);
     val = json_rpc_call(curl, curl_err_str, lp_url, pool->rpc_userpass,
             lpreq, false, true, &rolltime, pool, false);
 
@@ -9281,8 +9058,9 @@ int main(int argc, char *argv[])
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd < 0)
     fd = open("/dev/random", O_RDONLY);
-  read(fd, &eth_nonce, 4);
-  read(fd, entropy, sizeof(entropy));
+  size_t r = read(fd, &eth_nonce, 4);
+  r += read(fd, entropy, sizeof(entropy));
+  assert(r);
   close(fd);
 #endif
   mutex_init(&hash_lock);
@@ -9528,13 +9306,7 @@ int main(int argc, char *argv[])
         quit(1, "Failed to malloc userpass");
 
       char *point_chr = strchr(pool->rpc_user, '.');
-      if (pool->algorithm.type == ALGO_EQUIHASH && point_chr != NULL) {
-        *point_chr = '\0';
-        snprintf(pool->rpc_userpass, siz, "%s:%s", pool->rpc_user, pool->rpc_pass);
-        *point_chr = '.';
-      }
-      else
-        snprintf(pool->rpc_userpass, siz, "%s:%s", pool->rpc_user, pool->rpc_pass);
+      snprintf(pool->rpc_userpass, siz, "%s:%s", pool->rpc_user, pool->rpc_pass);
     }
   }
   /* Set the currentpool to pool 0 */

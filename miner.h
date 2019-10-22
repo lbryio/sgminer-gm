@@ -1505,7 +1505,7 @@ struct pool {
   size_t gbt_txns;
   size_t coinbase_len;
 
-  /* equihash GBT or LBRY claim hash */
+  /* LBRY claim hash */
   unsigned char reserved[32];
 
   /* Shared by both stratum & GBT */
@@ -1544,8 +1544,6 @@ struct work {
   uint32_t XMRBlobLen;
   bool is_monero;
   
-  unsigned char equihash_data[1487];
-
   int   rolls;
   int   drv_rolllimit; /* How much the driver can roll ntime */
 

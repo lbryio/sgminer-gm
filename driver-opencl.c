@@ -36,8 +36,6 @@
 #include "util.h"
 #include "sysfs-gpu-controls.h"
 
-#include "algorithm/equihash.h"
-
 /* TODO: cleanup externals ********************/
 
 #ifdef HAVE_CURSES
@@ -1418,55 +1416,6 @@ static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
   if (hashes > gpu->max_hashes)
     gpu->max_hashes = hashes;
 
-  if (gpu->algorithm.type == ALGO_EQUIHASH) {
-    int64_t ret = 0;
-    size_t length = sizeof(sols_t);
-    uint64_t t0 = time(NULL);
-    uint8_t prev_hash[32];
-    size_t txns;
-    bool stale = true;
-    
-    if (work->getwork_mode != GETWORK_MODE_STRATUM) {
-      cg_rlock(&work->pool->gbt_lock);
-      txns = work->pool->gbt_txns;
-      memcpy(prev_hash, work->pool->previousblockhash, 32);
-      cg_runlock(&work->pool->gbt_lock);
-    }
-    
-    thrdata->res = realloc(thrdata->res, length);
-    sols_t *sols = (sols_t*) thrdata->res;
-    work->thr = thr;
-    do {
-      status = thrdata->queue_kernel_parameters(clState, &work->blk, globalThreads[0]);
-      status |= clEnqueueReadBuffer(clState->commandQueue, clState->outputBuffer, CL_TRUE, 0, length, thrdata->res, 0, NULL,  NULL);
-      if (status == CL_SUCCESS) {
-        if (sols->nr > MAX_SOLS) {
-          applog(LOG_DEBUG, "equihash: %d (probably invalid) solutions were dropped!", sols->nr - MAX_SOLS);
-          sols->nr = MAX_SOLS;
-        }
-        for (int sol_i = 0; sol_i < sols->nr; sol_i++)
-          ret += equihash_verify_sol(work, sols, sol_i);
-      }
-      else {
-        applog(LOG_ERR, "Error %d: Reading result buffer for ALGO_EQUIHASH failed. (clEnqueueReadBuffer)", status);
-        return -1;
-      }
-      
-      // increase nonce
-      work->blk.nonce++;
-      if (work->getwork_mode == GETWORK_MODE_STRATUM)
-        *(uint16_t*)(work->equihash_data + 108 + strlen(work->nonce1) / 2) += 1;
-      else {
-        *(uint64_t*)(work->equihash_data + 108) += 1;
-        
-        cg_rlock(&work->pool->gbt_lock);
-        stale = (work->pool->gbt_txns != txns) || (memcmp(prev_hash, work->pool->previousblockhash, 32) != 0);
-        cg_runlock(&work->pool->gbt_lock);
-      }
-    } while (!stale && (time(NULL) - t0) < 2); 
-    return ret;
-  }
-  
   status = thrdata->queue_kernel_parameters(clState, &work->blk, globalThreads[0]);
   if (unlikely(status != CL_SUCCESS)) {
     if (status > 0)

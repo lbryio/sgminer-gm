@@ -19,6 +19,7 @@ AC_CANONICAL_SYSTEM
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([sgminer.c])
 AC_CONFIG_HEADERS([config.h])
+AH_TOP([#pragma once])
 
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
