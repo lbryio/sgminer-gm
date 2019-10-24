@@ -146,6 +146,7 @@ void suspend_stratum(struct pool *pool);
 void dev_error(struct cgpu_info *dev, enum dev_reason reason);
 void *realloc_strcat(char *ptr, char *s);
 void RenameThread(const char* name);
+void address_to_pubkeyhash(unsigned char *pkh, const char *addr);
 void _cgsem_init(cgsem_t *cgsem, const char *file, const char *func, const int line);
 void _cgsem_post(cgsem_t *cgsem, const char *file, const char *func, const int line);
 void _cgsem_wait(cgsem_t *cgsem, const char *file, const char *func, const int line);

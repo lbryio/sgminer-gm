@@ -681,6 +681,54 @@ bool eth_hex2bin(unsigned char *p, const char *hexstr, size_t len)
   return hex2bin(p, hexstr, len);
 }
 
+static const int b58tobin_tbl[] = {
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1,  0,  1,  2,  3,  4,  5,  6,  7,  8, -1, -1, -1, -1, -1, -1,
+  -1,  9, 10, 11, 12, 13, 14, 15, 16, -1, 17, 18, 19, 20, 21, -1,
+  22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, -1, -1, -1, -1, -1,
+  -1, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, -1, 44, 45, 46,
+  47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57
+};
+
+void b58tobin(unsigned char *b58bin, const char *b58)
+{
+  uint32_t c, bin32[7];
+  int len, i, j;
+  uint64_t t;
+
+  memset(bin32, 0, 7 * sizeof(uint32_t));
+  len = strlen(b58);
+  for (i = 0; i < len; i++) {
+    c = b58[i];
+    c = b58tobin_tbl[c];
+    for (j = 6; j >= 0; j--) {
+      t = ((uint64_t)bin32[j]) * 58 + c;
+      c = (t & 0x3f00000000ull) >> 32;
+      bin32[j] = t & 0xffffffffull;
+	}
+  }
+  *(b58bin++) = bin32[0] & 0xff;
+  for (i = 1; i < 7; i++) {
+    *((uint32_t *)b58bin) = htobe32(bin32[i]);
+    b58bin += sizeof(uint32_t);
+  }
+}
+
+void address_to_pubkeyhash(unsigned char *pkh, const char *addr)
+{
+  unsigned char b58bin[25];
+  memset(b58bin, 0, 25);
+  b58tobin(b58bin, addr);
+  pkh[0] = 0x76;
+  pkh[1] = 0xa9;
+  pkh[2] = 0x14;
+  memcpy(&pkh[3], &b58bin[1], 20);
+  pkh[23] = 0x88;
+  pkh[24] = 0xac;
+}
+
 bool fulltest(const unsigned char *hash, const unsigned char *target)
 {
   uint32_t *hash32 = (uint32_t *)hash;
