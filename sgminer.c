@@ -2059,8 +2059,9 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
   for (i = 0; i < pool->gbt_txns; i++) {
     json_t *array_elem = json_array_get(txn_array, i);
     json_t *txid = json_object_get(array_elem, "txid");
+    if (!txid) txid = json_object_get(array_elem, "hash");
     hex2bin(bin, json_string_value(txid), 32);
-    swap256(pool->txn_hashes + 32 * i, bin);
+    swab256(pool->txn_hashes + 32 * i, bin);
   } else
   for (i = 0; i < pool->gbt_txns; i++) {
     json_t *txn_val = json_object_get(json_array_get(txn_array, i), "data");
@@ -2304,6 +2305,59 @@ int ser_number(unsigned char *s, int32_t val)
 
 static const char scriptsig_header[] = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
 
+static const unsigned char witness_nonce[32] = {0};
+static const int witness_nonce_size = sizeof(witness_nonce);
+static const unsigned char witness_header[] = {0xaa, 0x21, 0xa9, 0xed};
+static const int witness_header_size = sizeof(witness_header);
+static const int witnessdata_size = witness_header_size + witness_nonce_size;
+
+static bool gbt_witness_data(json_t *transaction_arr, unsigned char* witnessdata, int avail_size)
+{
+  int i, binlen, txncount = json_array_size(transaction_arr);
+  unsigned char *hashbin;
+  const char *hash;
+  json_t *arr_val;
+
+  binlen = txncount * 32 + 32;
+  hashbin = alloca(binlen + 32);
+  memset(hashbin, 0, 32);
+
+  if (avail_size < witnessdata_size)
+	return false;
+
+  for (i = 0; i < txncount; i++) {
+    unsigned char binswap[32];
+    arr_val = json_array_get(transaction_arr, i);
+    hash = json_string_value(json_object_get(arr_val, "hash"));
+    if (unlikely(!hash)) {
+      applog(LOG_ERR, "Hash missing for transaction");
+      return false;
+    }
+    if (!hex2bin(binswap, hash, 32)) {
+      applog(LOG_ERR, "Failed to hex2bin hash in gbt_witness_data");
+      return false;
+    }
+    swab256(hashbin + 32 + 32 * i, binswap);
+  }
+
+  // Build merkle root (copied from libblkmaker)
+  for (txncount++ ; txncount > 1 ; txncount /= 2) {
+    if (txncount % 2) {
+      // Odd number, duplicate the last
+      memcpy(hashbin + 32 * txncount, hashbin + 32 * (txncount - 1), 32);
+      txncount++;
+    }
+    for (i = 0; i < txncount; i += 2)
+      // We overlap input and output here, on the first pair
+      gen_hash(hashbin + 32 * i, 64, hashbin + 32 * (i / 2));
+  }
+
+  memcpy(witnessdata, witness_header, witness_header_size);
+  memcpy(hashbin + 32, &witness_nonce, witness_nonce_size);
+  gen_hash(hashbin, 32 + witness_nonce_size, witnessdata + witness_header_size);
+  return true;
+}
+
 static bool gbt_decode(struct pool *pool, json_t *res_val)
 {
   json_t* tmp;
@@ -2395,17 +2449,16 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   hex2bin(bin_value, pool->coinbasetxn, offset);
   extra_len = (uint8_t *)(bin_value + offset - 1);
   if (have_segwit) {
-    uint64_t *u64;
-    uint32_t *u32;
-    int txout_size, witnessdata_size, txout_start, witnessdata_start, ofs = 0;
+    uint64_t *u64; uint32_t *u32; int ofs = 0;
+    unsigned char witnessdata[64] = {}, *address;
+    json_t *txns = json_object_get(res_val, "transactions");
     len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
     hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
-    txout_start = len + 1;
-    txout_size = script_size;
-    len += txout_size + 8 + 1;
-    hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
-    witnessdata_size = script_size;
-    witnessdata_start = len + 1;
+    address = alloca((script_size * 2) + 1);
+    strncpy(address, pool->coinbasetxn + ((len + 1) * 2), script_size * 2);
+    address[script_size * 2] = 0;
+    if (!gbt_witness_data(txns, witnessdata, 64))
+        return false;
     unsigned char scriptsig_base[64] = {0};
     ofs++; // Leave room for template length
 
@@ -2423,11 +2476,11 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     scriptsig_base[ofs++] = 0xfe; // Encode seconds as u32
     u32 = (uint32_t *)&scriptsig_base[ofs];
     *u32 = htole32(now.tv_sec);
-    ofs += 4; // sizeof uint32_t
+    ofs += sizeof(uint32_t);
     scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
     u32 = (uint32_t *)&scriptsig_base[ofs];
     *u32 = htole32(now.tv_usec);
-    ofs += 4; // sizeof uint32_t
+    ofs += sizeof(uint32_t);
 
     memcpy(scriptsig_base + ofs, "\x09\x63\x67\x6d\x69\x6e\x65\x72\x34\x32", 10);
     ofs += 10;
@@ -2445,25 +2498,26 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
       + 4 // txin sequence no
       + 1 // txouts
       + 8 // value
-      + 1 + txout_size // txout
+      + 1 + 25 // txout
       + 4 // lock
       + 8 //value
-      + 1 + witnessdata_size; // total scriptPubKey size + OP_RETURN + push size + data
+      + 1 + 2 + witnessdata_size; // total scriptPubKey size + OP_RETURN + push size + data
 
     pool->coinbase = calloc(len, 1);
     hex2bin(pool->coinbase, scriptsig_header, 41);
-    pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = txout_size;
-    hex2bin(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, pool->coinbasetxn + (txout_start * 2), txout_size);
+    pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = 25;
+    address_to_pubkeyhash(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, address);
     memcpy(pool->coinbase + 41, scriptsig_base, ofs);
     memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
     pool->coinbase[41 + ofs + 4] = 2;
     u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
     *u64 = htole64(coinbasevalue);
-    ofs += 41 + 4 + 1 + 8 + 1 + txout_size;
+    ofs += 41 + 4 + 1 + 8 + 1 + 25;
     memset(pool->coinbase + ofs, 0, 8);
-    pool->coinbase[ofs + 8] = witnessdata_size;
-    hex2bin(pool->coinbase + ofs + 8 + 1, pool->coinbasetxn + (witnessdata_start * 2), witnessdata_size);
-    witnessdata_size += 9;
+    unsigned char witness_info[] = { witnessdata_size + 2, 0x6a, witnessdata_size };
+    memcpy(pool->coinbase + ofs + 8, witness_info, sizeof(witness_info));
+    ofs += 8 + sizeof(witness_info);
+    memcpy(pool->coinbase + ofs, witnessdata, witnessdata_size);
     pool->nonce2 = 0;
     pool->n2size = 4;
     pool->coinbase_len = ofs + witnessdata_size + 4;
