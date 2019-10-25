@@ -121,7 +121,7 @@ int clDevicesNum(void) {
   status = clGetPlatformInfo(platform, CL_PLATFORM_VERSION, sizeof(pbuff), pbuff, NULL);
   if (status == CL_SUCCESS)
     applog(LOG_INFO, "CL Platform version: %s", pbuff);
-  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, NULL, &numDevices);
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, NULL, &numDevices);
   if (status != CL_SUCCESS) {
     applog(LOG_INFO, "Error %d: Getting Device IDs (num)", status);
     goto out;
@@ -131,7 +131,7 @@ int clDevicesNum(void) {
     unsigned int j;
     cl_device_id *devices = (cl_device_id *)malloc(numDevices*sizeof(cl_device_id));
 
-    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices, NULL);
+    clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, numDevices, devices, NULL);
     for (j = 0; j < numDevices; j++) {
       clGetDeviceInfo(devices[j], CL_DEVICE_NAME, sizeof(pbuff), pbuff, NULL);
       applog(LOG_INFO, "\t%i\t%s", j, pbuff);
@@ -170,7 +170,7 @@ static cl_int create_opencl_context(cl_context *context, cl_platform_id *platfor
   cl_context_properties cps[3] = { CL_CONTEXT_PLATFORM, (cl_context_properties)*platform, 0 };
   cl_int status;
 
-  *context = clCreateContextFromType(cps, CL_DEVICE_TYPE_GPU, NULL, NULL, &status);
+  *context = clCreateContextFromType(cps, CL_DEVICE_TYPE_ALL, NULL, NULL, &status);
   return status;
 }
 
@@ -269,7 +269,7 @@ _clState *initCl(unsigned int gpu, char *name, size_t nameSize, algorithm_t *alg
 
   /* Now, get the device list data */
 
-  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices, NULL);
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, numDevices, devices, NULL);
   if (status != CL_SUCCESS) {
     free(clState);
     applog(LOG_ERR, "Error %d: Getting Device IDs (list)", status);
