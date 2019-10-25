@@ -2009,6 +2009,8 @@ void clean_work(struct work *w)
   free(w->job_id);
   free(w->ntime);
   free(w->coinbase);
+  if (w->txn_data)
+    free(w->txn_data);
   free(w->nonce1);
   memset(w, 0, sizeof(struct work));
 }
@@ -2039,6 +2041,9 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
 
   free(pool->txn_hashes);
   pool->txn_hashes = NULL;
+  if (pool->txn_data)
+    free(pool->txn_data);
+  pool->txn_data = NULL;
   pool->gbt_txns = 0;
 
   txn_array = json_object_get(res_val, "transactions");
@@ -2060,6 +2065,8 @@ static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
     json_t *array_elem = json_array_get(txn_array, i);
     json_t *txid = json_object_get(array_elem, "txid");
     if (!txid) txid = json_object_get(array_elem, "hash");
+    json_t *data = json_object_get(array_elem, "data");
+    pool->txn_data = realloc_strcat(pool->txn_data, json_string_value(data));
     hex2bin(bin, json_string_value(txid), 32);
     swab256(pool->txn_hashes + 32 * i, bin);
   } else
@@ -2240,6 +2247,8 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
   memcpy(work->target, pool->gbt_target, 32);
 
   work->coinbase = bin2hex(pool->coinbase, pool->coinbase_len);
+  if (pool->txn_data)
+    work->txn_data = strdup(pool->txn_data);
 
   /* For encoding the block data on submission */
   work->gbt_txns = pool->gbt_txns + 1;
@@ -3491,6 +3500,9 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
 
       s = strdup("{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"");
       s = (char *)realloc_strcat(s, gbt_block);
+      if (have_segwit && work->txn_data)
+        s = realloc_strcat(s, work->txn_data);
+
       if (work->job_id) {
         s = (char *)realloc_strcat(s, "\", {\"workid\": \"");
         s = (char *)realloc_strcat(s, work->job_id);
@@ -4314,6 +4326,8 @@ static void _copy_work(struct work *work, const struct work *base_work, int noff
   }
   if (base_work->coinbase)
     work->coinbase = strdup(base_work->coinbase);
+  if (base_work->txn_data)
+    work->txn_data = strdup(base_work->txn_data);
 }
 
 /* Generates a copy of an existing work struct, creating fresh heap allocations
