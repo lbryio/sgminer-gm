@@ -2318,7 +2318,7 @@ static const unsigned char witness_nonce[32] = {0};
 static const int witness_nonce_size = sizeof(witness_nonce);
 static const unsigned char witness_header[] = {0xaa, 0x21, 0xa9, 0xed};
 static const int witness_header_size = sizeof(witness_header);
-static const int witnessdata_size = witness_header_size + witness_nonce_size;
+static const int witnessdata_size = sizeof(witness_header) + sizeof(witness_nonce);
 
 static bool gbt_witness_data(json_t *transaction_arr, unsigned char* witnessdata, int avail_size)
 {
