@@ -1501,6 +1501,7 @@ struct pool {
   uint32_t gbt_version;
   uint32_t curtime;
   uint32_t gbt_bits;
+  char *txn_data;
   unsigned char *txn_hashes;
   size_t gbt_txns;
   size_t coinbase_len;
@@ -1573,6 +1574,7 @@ struct work {
 
   bool    gbt;
   char    *coinbase;
+  char    *txn_data;
   int   gbt_txns;
 
   unsigned int  work_block;
