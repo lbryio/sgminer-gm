@@ -2180,6 +2180,7 @@ static double get_work_blockdiff(const struct work *work)
     int offset = work->pool->algorithm.type == ALGO_LBRY ? 104 : 72;
     uint8_t pow = work->data[offset];
     int powdiff = (8 * (0x1d - 3)) - (8 * (pow - 3));
+    if (powdiff < 0) powdiff = 0;
     diff64 = be32toh(*((uint32_t *)(work->data + offset))) & 0x0000000000FFFFFF;
     numerator = work->pool->algorithm.diff_numerator << powdiff;
   }
@@ -3500,7 +3501,7 @@ static bool submit_upstream_work(struct work *work, CURL *curl, char *curl_err_s
 
       s = strdup("{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"");
       s = (char *)realloc_strcat(s, gbt_block);
-      if (have_segwit && work->txn_data)
+      if (work->txn_data)
         s = realloc_strcat(s, work->txn_data);
 
       if (work->job_id) {
@@ -3833,7 +3834,6 @@ static void calc_diff(struct work *work, double known)
       dcut64 = (double)*((uint64_t *)(work->target + 22));
     }
     else {
-      applog(LOG_DEBUG, "target: %s", bin2hex(work->target, 32));
       dcut64 = le256todouble(work->target);
     }
 
