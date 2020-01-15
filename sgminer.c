@@ -192,6 +192,8 @@ int opt_tcp_keepalive;
 #endif
 double opt_diff_mult = 0.0;
 
+char *opt_address = NULL;
+
 char *opt_kernel_path;
 char *sgminer_path;
 
@@ -1381,6 +1383,13 @@ static char *set_api_mcast_des(const char *arg)
   return NULL;
 }
 
+static char *set_api_address(const char *arg)
+{
+  opt_set_charp(arg, &opt_address);
+
+  return NULL;
+}
+
 static char *set_null(const char __maybe_unused *arg)
 {
   return NULL;
@@ -1602,6 +1611,11 @@ struct opt_table opt_config_table[] = {
       opt_set_charp, NULL, &opt_stderr_cmd,
       "Use custom pipe cmd for output messages"),
 #endif // defined(unix)
+#ifdef HAVE_LIBCURL
+  OPT_WITH_ARG("--address|-a",
+      set_api_address, NULL, NULL,
+      "Set mining address, NOTE it does not affect stratum, default: use coinbasetxn address"),
+#endif
   OPT_WITH_ARG("--name|--pool-name",
       set_pool_name, NULL, NULL,
       "Name of pool"),
@@ -2406,7 +2420,7 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
   flags = json_string_value(json_object_get(json_object_get(res_val, "coinbaseaux"), "flags"));
   coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
 
-  bool invalid =  (!previousblockhash || !target || !coinbasetxn || !longpollid || !version || !curtime || !bits);
+  bool invalid =  (!previousblockhash || !target || (!coinbasetxn && !opt_address) || !longpollid || !version || !curtime || !bits);
 
   if (previousblockhash)
     applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
@@ -2416,8 +2430,8 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     applog(LOG_DEBUG, "target: %s", target);
   if (coinbasetxn)
     applog(LOG_DEBUG, "coinbasetxn: %s", coinbasetxn);
-  else
-    applog(LOG_WARNING, "coinbasetxn is invalid, make sure you're connected to node with wallet enabled");
+  else if (!opt_address)
+    applog(LOG_WARNING, "neither coinbasetxn nor address are set, make sure you use stratum or set address by yourself");
   if (longpollid)
     applog(LOG_DEBUG, "longpollid: %s", longpollid);
   applog(LOG_DEBUG, "version: %d", version);
@@ -2434,8 +2448,6 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     return false;
   }
 
-  cg_wlock(&pool->gbt_lock);
-
   have_segwit = false;
   tmp = json_object_get(res_val, "rules");
   if (tmp && json_is_array(tmp)) {
@@ -2449,26 +2461,39 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
     }
   }
 
+  if (!coinbasetxn && !have_segwit) {
+    if (opt_address)
+      applog(LOG_NOTICE, "--address|-a can be used only with segwit enabled node");
+    applog(LOG_WARNING, "Make sure you're connected to node with walled enabled");
+    return false;
+  }
+
+  cg_wlock(&pool->gbt_lock);
+
   int offset = 42, len;
   unsigned char script_size, bin_value[44];
-  if (strncmp(coinbasetxn, "01000000", 8) && strncmp(coinbasetxn + 8, "0001", 4) == 0)
-      offset += 2;
   free(pool->coinbase);
-  free(pool->coinbasetxn);
-  pool->coinbasetxn = strdup(coinbasetxn);
-  hex2bin(bin_value, pool->coinbasetxn, offset);
-  extra_len = (uint8_t *)(bin_value + offset - 1);
+  if (coinbasetxn) {
+    if (strncmp(coinbasetxn, "01000000", 8) && strncmp(coinbasetxn + 8, "0001", 4) == 0)
+      offset += 2;
+    free(pool->coinbasetxn);
+    pool->coinbasetxn = strdup(coinbasetxn);
+    hex2bin(bin_value, pool->coinbasetxn, offset);
+    extra_len = (uint8_t *)(bin_value + offset - 1);
+  }
   if (have_segwit) {
     uint64_t *u64; uint32_t *u32; int ofs = 0;
-    unsigned char witnessdata[64] = {}, *address;
+    unsigned char witnessdata[64] = {}, *address = opt_address;
     json_t *txns = json_object_get(res_val, "transactions");
-    len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
-    hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
-    address = alloca((script_size * 2) + 1);
-    strncpy(address, pool->coinbasetxn + ((len + 1) * 2), script_size * 2);
-    address[script_size * 2] = 0;
+    if (!address && coinbasetxn) {
+      len = offset + *extra_len + 4 + 1 + 8; // sequence, out counter, coinbase value
+      hex2bin(&script_size, pool->coinbasetxn + (len * 2), 1);
+      address = alloca((script_size * 2) + 1);
+      strncpy(address, pool->coinbasetxn + ((len + 1) * 2), script_size * 2);
+      address[script_size * 2] = 0;
+    }
     if (!gbt_witness_data(txns, witnessdata, 64))
-        return false;
+      return false;
     unsigned char scriptsig_base[64] = {0};
     ofs++; // Leave room for template length
 
@@ -6260,6 +6285,46 @@ static bool stratum_works(struct pool *pool)
   return true;
 }
 
+#ifdef HAVE_LIBCURL
+static bool setup_gbt_address(CURL *curl, struct pool *pool)
+{
+	char s[256];
+	int uninitialised_var(rolltime);
+	bool ret = false;
+    char curl_err_str[CURL_ERROR_SIZE];
+	json_t *val = NULL, *res_val, *valid_val;
+
+	snprintf(s, 256, "{\"id\": 1, \"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", opt_address);
+    val = json_rpc_call(curl, curl_err_str, pool->rpc_url, pool->rpc_userpass, s, true,
+                        false, &rolltime, pool, false);
+	if (!val)
+		goto out;
+	res_val = json_object_get(val, "result");
+	if (!res_val)
+		goto out;
+	valid_val = json_object_get(res_val, "isvalid");
+	if (!valid_val)
+		goto out;
+	if (!json_is_true(valid_val)) {
+		applog(LOG_ERR, "Address %s is NOT valid", opt_address);
+		goto out;
+	}
+	applog(LOG_NOTICE, "Mining to valid address: %s", opt_address);
+	ret = true;
+out:
+	if (val)
+		json_decref(val);
+    if (!ret)
+        opt_address = NULL;
+	return ret;
+}
+#else
+static bool setup_gbt_address(CURL*, struct pool*)
+{
+	return false;
+}
+#endif
+
 static bool pool_active(struct pool *pool, bool pinging)
 {
   struct timeval tv_getwork, tv_getwork_reply;
@@ -6394,6 +6459,8 @@ retry_stratum:
 
     if (rc) {
       applog(LOG_DEBUG, "Successfully retrieved and deciphered work from %s", get_pool_name(pool));
+      if (opt_address)
+        setup_gbt_address(curl, pool);
       work->pool = pool;
       work->rolltime = (pool->algorithm.type == ALGO_ETHASH) ? 0 : rolltime;
       copy_time(&work->tv_getwork, &tv_getwork);
